@@ -1,0 +1,483 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'CloudFormation template for Kubernetes Config Management'
+
+Parameters:
+  DeploymentBucketName:
+    Type: String
+    Description: 'Name of the S3 bucket containing Lambda function code'
+    
+  ScheduleFrequency:
+    Type: String
+    Default: 'rate(1 hour)'
+    Description: "Schedule expression for the state machine execution (e.g., rate(1 hour), rate(30 minutes), cron(0 * * * ? *)). Don't modify this value if you are not familiar with the logic of the state machine. "
+
+  ResourceKinds:
+    Type: String
+    Default: 'Pod, Deployment, Service, ConfigMap, PersistentVolumeClaim, Ingress, StatefulSet, DaemonSet, Job, CronJob, NetworkPolicy, Namespace'
+    Description: 'Comma-separated list of Kubernetes resource kinds to scan'
+  
+  LabelSelector:
+    Type: String
+    Description: 'Kubernetes label selector to filter resources (Optional)'
+    Default: ''
+  
+  IncludeNamespaces:
+    Type: String
+    Description: 'Comma-separated list of namespaces to include (leave empty to include all except excluded fields)'
+    Default: ''
+  
+  ExcludeNamespaces:
+    Type: String
+    Description: 'Comma-separated list of namespaces to exclude (leave empty to exclude none)'
+    Default: ''
+  
+  IncludeResourceFields:
+    Type: String
+    Description: 'Comma-separated list of resource fields to include (leave empty to include all except excluded fields)'
+    Default: ''
+  
+  ExcludeResourceFields:
+    Type: String
+    Default: 'metadata.managedFields, status, data'
+    Description: 'Comma-separated list of resource fields to exclude (leave empty to exclude none)'
+    
+  IncludeClusterTag:
+    Type: String
+    Description: 'Tag key to include EKS clusters (only clusters with this tag will be processed, leave empty to include all clusters)'
+    Default: ''
+    
+  ExcludeClusterTag:
+    Type: String
+    Default: 'exclude-from-config-for-k8s'
+    Description: 'Tag key to exclude EKS clusters (clusters with this tag will be skipped, leave empty to exclude none)'
+
+  VpcId:
+    Type: String
+    Description: 'VPC ID where Lambda functions will run to access private EKS endpoints (Required if using private EKS endpoints)'
+    Default: ''
+
+  SubnetIds:
+    Type: CommaDelimitedList
+    Description: 'Comma-separated list of subnet IDs within the specified VPC for Lambda functions to access private EKS endpoints (Required if using private EKS endpoints)'
+    Default: ''
+
+Conditions:
+  UseVpc: !Not [!Equals [!Ref VpcId, '']]
+
+Resources:
+  LambdaSecurityGroup:
+    Condition: UseVpc
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Lambda functions to access EKS private endpoints
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: Allow HTTPS outbound traffic for AWS services and Kubernetes API
+
+  ConfigBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'config-for-kubernetes-${AWS::AccountId}-${AWS::Region}-data'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteExecutionDataAfterOneWeek
+            Status: Enabled
+            Prefix: executions/
+            ExpirationInDays: 7
+            NoncurrentVersionExpirationInDays: 7
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+
+  DiscoverResourcesRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns: 
+        !If
+          - UseVpc
+          -
+            - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+            - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+          -
+            - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: EksAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - eks:DescribeCluster
+                  - eks:ListClusters
+                  - eks:CreateAccessEntry
+                  - eks:AssociateAccessPolicy
+                  - eks:DescribeAccessEntry
+                  - sts:GetCallerIdentity
+                # Resource: '*' needed to scan all Amazon EKS clusters for resource configuration retrieval
+                Resource: '*'
+        - PolicyName: ConfigAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - config:ListDiscoveredResources
+                # Resource: '*' needed to List discovered resources on AWS Config
+                Resource: '*'
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub 'arn:aws:s3:::${ConfigBucket}'
+                  - !Sub 'arn:aws:s3:::${ConfigBucket}/*'
+
+  RegisterResourcesRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns: 
+        !If
+          - UseVpc
+          -
+            - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+            - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+          -
+            - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ConfigAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - config:PutResourceConfig
+                # Resource: '*' needed to Put resource configuration on AWS Config
+                Resource: '*'
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub 'arn:aws:s3:::${ConfigBucket}'
+                  - !Sub 'arn:aws:s3:::${ConfigBucket}/*'
+        - PolicyName: CloudFormationAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudformation:DescribeType
+                # Resource: '*' needed to describe custom resource types from CloudFormation registry
+                Resource: '*'
+
+  DeleteResourcesRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns: 
+        !If
+          - UseVpc
+          -
+            - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+            - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+          -
+            - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ConfigAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - config:DeleteResourceConfig
+                # Resource: '*' needed to Delete resource configuration on AWS Config
+                Resource: '*'
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub 'arn:aws:s3:::${ConfigBucket}'
+                  - !Sub 'arn:aws:s3:::${ConfigBucket}/*'
+
+  StepFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeLambda
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !GetAtt DiscoverResourcesFunction.Arn
+                  - !GetAtt RegisterResourcesFunction.Arn
+                  - !GetAtt DeleteResourcesFunction.Arn
+        - PolicyName: StepFunctionsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - states:ListExecutions
+                Resource: !Sub arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:stateMachine:KubernetesConfigManagement
+
+  DiscoverResourcesFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: DiscoverResources
+      Handler: index.lambda_handler
+      Role: !GetAtt DiscoverResourcesRole.Arn
+      Runtime: python3.13
+      Timeout: 900  # 15 minutes
+      MemorySize: 2048
+      ReservedConcurrentExecutions: 1
+      VpcConfig: 
+        !If 
+          - UseVpc
+          - SubnetIds: !Ref SubnetIds
+            SecurityGroupIds: 
+              - !Ref LambdaSecurityGroup
+          - !Ref AWS::NoValue
+      Environment:
+        Variables:
+          S3_BUCKET: !Ref ConfigBucket
+          LAMBDA_ROLE: !GetAtt DiscoverResourcesRole.Arn
+          RESOURCE_KINDS: !Ref ResourceKinds
+          LABEL_SELECTOR: !Ref LabelSelector
+          INCLUDE_NAMESPACES: !Ref IncludeNamespaces
+          EXCLUDE_NAMESPACES: !Ref ExcludeNamespaces
+          INCLUDE_RESOURCE_FIELDS: !Ref IncludeResourceFields
+          EXCLUDE_RESOURCE_FIELDS: !Ref ExcludeResourceFields
+          INCLUDE_CLUSTER_TAG: !Ref IncludeClusterTag
+          EXCLUDE_CLUSTER_TAG: !Ref ExcludeClusterTag
+      Code:
+        S3Bucket: !Ref DeploymentBucketName
+        S3Key: functions/{{BUILD_ID}}/discover_resources.zip
+
+  RegisterResourcesFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: RegisterResources
+      Handler: index.lambda_handler
+      Role: !GetAtt RegisterResourcesRole.Arn
+      Runtime: python3.13
+      Timeout: 900  # 15 minutes
+      MemorySize: 1024
+      ReservedConcurrentExecutions: 1
+      VpcConfig: 
+        !If 
+          - UseVpc
+          - SubnetIds: !Ref SubnetIds
+            SecurityGroupIds: 
+              - !Ref LambdaSecurityGroup
+          - !Ref AWS::NoValue
+      Environment:
+        Variables:
+          S3_BUCKET: !Ref ConfigBucket
+      Code:
+        S3Bucket: !Ref DeploymentBucketName
+        S3Key: functions/{{BUILD_ID}}/register_resources.zip
+
+  DeleteResourcesFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: DeleteResources
+      Handler: index.lambda_handler
+      Role: !GetAtt DeleteResourcesRole.Arn
+      Runtime: python3.13
+      Timeout: 900  # 15 minutes
+      MemorySize: 1024
+      ReservedConcurrentExecutions: 1
+      VpcConfig: 
+        !If 
+          - UseVpc
+          - SubnetIds: !Ref SubnetIds
+            SecurityGroupIds: 
+              - !Ref LambdaSecurityGroup
+          - !Ref AWS::NoValue
+      Environment:
+        Variables:
+          S3_BUCKET: !Ref ConfigBucket
+      Code:
+        S3Bucket: !Ref DeploymentBucketName
+        S3Key: functions/{{BUILD_ID}}/delete_resources.zip
+
+  K8sConfigStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: KubernetesConfigManagement
+      RoleArn: !GetAtt StepFunctionRole.Arn
+      Definition:
+        Comment: Step Function to manage Kubernetes resources in AWS Config
+        StartAt: CheckRunningExecutions
+        States:
+          CheckRunningExecutions:
+            Type: Task
+            Resource: 'arn:aws:states:::aws-sdk:sfn:listExecutions'
+            Parameters:
+              StateMachineArn.$: $$.StateMachine.Id
+              StatusFilter: RUNNING
+            ResultPath: $.executionCheck
+            Next: VerifyNoOtherRunningExecutions
+
+          VerifyNoOtherRunningExecutions:
+            Type: Choice
+            Choices:
+              - Variable: '$.executionCheck.Executions[1]'
+                IsPresent: true
+                Next: ExitDuplicateExecution
+            Default: DiscoverResources
+
+          ExitDuplicateExecution:
+            Type: Succeed
+            Comment: Exit because another execution is already running
+
+          DiscoverResources:
+            Type: Task
+            Resource: !GetAtt DiscoverResourcesFunction.Arn
+            Parameters:
+              executionId.$: $$.Execution.Id
+            ResultPath: "$"
+            Next: DeleteResources
+
+          DeleteResources:
+            Type: Map
+            ItemsPath: "$.toDeleteList"
+            Parameters:
+              s3Bucket.$: $.s3Bucket
+              executionId.$: $.executionId
+              batchIndex.$: $$.Map.Item.Value
+            ResultPath: "$.deleteResults"
+
+            MaxConcurrency: 1
+            Iterator:
+              StartAt: ProcessDeletion
+              States:
+                ProcessDeletion:
+                  Type: Task
+                  Resource: !GetAtt DeleteResourcesFunction.Arn
+                  Parameters:
+                    s3Bucket.$: $.s3Bucket
+                    executionId.$: $.executionId
+                    batchIndex.$: $.batchIndex
+                  End: true
+            Next: RegisterResources
+
+          RegisterResources:
+            Type: Map
+            ItemsPath: "$.toRegisterList"
+            Parameters:
+              s3Bucket.$: $.s3Bucket
+              executionId.$: $.executionId
+              batchIndex.$: $$.Map.Item.Value
+            MaxConcurrency: 1
+            Iterator:
+              StartAt: ProcessUpdate
+              States:
+                ProcessUpdate:
+                  Type: Task
+                  Resource: !GetAtt RegisterResourcesFunction.Arn
+                  Parameters:
+                    s3Bucket.$: $.s3Bucket
+                    executionId.$: $.executionId
+                    batchIndex.$: $.batchIndex
+                  End: true
+            End: true
+
+  StateMachineSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: KubernetesConfigManagementSchedule
+      Description: "Schedule for Kubernetes Config Management"
+      ScheduleExpression: !Ref ScheduleFrequency
+      State: ENABLED
+      Targets:
+        - Arn: !Ref K8sConfigStateMachine
+          Id: KubernetesConfigManagementTarget
+          RoleArn: !GetAtt EventsRole.Arn
+
+  EventsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StepFunctionsExecution
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: states:StartExecution
+                Resource: !Ref K8sConfigStateMachine
+
+Outputs:
+  StepFunctionArn:
+    Description: ARN of the State Machine
+    Value: !Ref K8sConfigStateMachine
+  S3BucketName:
+    Description: Name of the S3 bucket
+    Value: !Ref ConfigBucket

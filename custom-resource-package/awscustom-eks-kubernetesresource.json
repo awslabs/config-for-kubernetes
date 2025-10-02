@@ -1,0 +1,30 @@
+{
+    "typeName": "AWSCustom::EKS::KubernetesResource",
+    "description": "Represents a Kubernetes resource in an Amazon EKS cluster.",
+    "properties": {
+        "EksClusterName": {
+            "description": "The name of the Amazon EKS cluster where the Kubernetes resource resides.",
+            "type": "string"
+        },
+        "K8sNamespace": {
+            "description": "The Kubernetes namespace where the resource is located. For cluster-scoped resources, this is omitted.",
+            "type": "string"
+        },
+        "K8sResourceKind": {
+            "description": "The kind of Kubernetes resource, such as 'Pod', 'Deployment', 'Service', etc.",
+            "type": "string"
+        },
+        "K8sResourceName": {
+            "description": "The name of the Kubernetes resource.",
+            "type": "string"
+        },
+        "K8sItem": {
+            "description": "The full Kubernetes resource configuration.",
+            "type": "object"
+        }
+    },
+    "required": [ "EksClusterName", "K8sResourceKind", "K8sResourceName", "K8sItem" ],
+    "primaryIdentifier": [ "/properties/EksClusterName", "/properties/K8sNamespace", "/properties/K8sResourceKind", "/properties/K8sResourceName" ],
+    "createOnlyProperties": [ "/properties/EksClusterName", "/properties/K8sNamespace", "/properties/K8sResourceKind", "/properties/K8sResourceName" ],
+    "additionalProperties": false
+}
