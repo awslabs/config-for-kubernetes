@@ -1,5 +1,7 @@
 # Kubernetes Resource Recorder for AWS Config
 
+> 📝 **Blog Post:** For a detailed walkthrough and use cases, see the [AWS blog post: Extending AWS Config to Kubernetes resources in Amazon EKS](https://aws.amazon.com/blogs/mt/extending-aws-config-to-kubernetes-resources-in-amazon-eks/)
+
 This project extends AWS Config to record Kubernetes resources (such as Pods, Services, Deployments) from Amazon EKS clusters as custom resources in AWS Config. It enables you to track, audit, and evaluate the configuration of your Kubernetes resources alongside your AWS resources.
 
 ## Overview
