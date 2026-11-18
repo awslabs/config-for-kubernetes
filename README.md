@@ -216,6 +216,22 @@ The following table provides a sample cost breakdown for deploying this solution
 The solution automatically creates [EKS access entries](https://docs.aws.amazon.com/eks/latest/userguide/access-entries.html) for the Lambda execution role on each cluster that is processed. It associates the [`AmazonEKSViewPolicy`](https://docs.aws.amazon.com/eks/latest/userguide/access-policy-permissions.html#access-policy-permissions-amazoneksviewpolicy) (read-only) policy at the cluster level to enable resource discovery. This means the Lambda role will have read access to all resources in the clusters being monitored.
 You can use the `IncludeClusterTag` and `ExcludeClusterTag` CloudFormation parameters to control which clusters are monitored and therefore which clusters receive access entries.
 
+## Development and Tests
+
+Every pull request runs [`.github/workflows/ci.yml`](.github/workflows/ci.yml): it packages the Lambda functions, lints the CloudFormation template, runs the unit tests, and runs an end-to-end test against a real Kubernetes cluster ([kind](https://kind.sigs.k8s.io/)). The end-to-end test creates, changes and deletes Pods, Deployments and ConfigMaps and checks that each discovery run registers or deletes exactly those resources. AWS services are mocked, so CI needs no AWS account. Dependabot dependency updates that pass CI are merged automatically.
+
+To run the tests locally (Python 3.13):
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements-dev.txt
+python -m pytest tests/unit
+
+# Optional: end-to-end test against a disposable cluster
+kind create cluster --name c4k
+C4K_INTEGRATION=1 python -m pytest tests/integration
+```
+
 ## License
 
 Apache License 2.0 - see the LICENSE file for details.

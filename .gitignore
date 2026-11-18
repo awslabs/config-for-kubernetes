@@ -1,3 +1,6 @@
 **/.DS_Store
 cloudformation.yaml
 custom-resource-package/docs
+.venv/
+__pycache__/
+.pytest_cache/

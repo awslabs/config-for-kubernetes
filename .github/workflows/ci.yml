@@ -1,0 +1,107 @@
+name: CI
+
+# Gate for Dependabot auto-merge (remediation path "auto-merge"):
+# every pull request must build, pass unit tests, and pass the end-to-end
+# test against a real Kubernetes API server before it can merge.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13" # matches the Lambda runtime in the template
+          cache: pip
+      - name: Install tools
+        run: pip install -r requirements-dev.txt
+      - name: Package Lambda functions the way build.sh does
+        run: |
+          set -euo pipefail
+          for fn in discover_resources register_resources delete_resources; do
+            dir="source/functions/$fn"
+            out="$RUNNER_TEMP/package/$fn"
+            mkdir -p "$out"
+            if [ -f "$dir/requirements.txt" ]; then
+              pip install -r "$dir/requirements.txt" -t "$out" --no-cache-dir --quiet
+            fi
+            cp "$dir"/*.py "$out/"
+            python -m py_compile "$out"/index.py
+          done
+      - name: Resolve custom resource package dependencies
+        run: pip install -r custom-resource-package/requirements.txt -t "$RUNNER_TEMP/crp" --quiet
+      - name: Validate custom resource schema
+        run: python -c "import json; json.load(open('custom-resource-package/awscustom-eks-kubernetesresource.json'))"
+      - name: Lint CloudFormation template
+        run: |
+          sed "s/{{BUILD_ID}}/ci/g" source/cloudformation-source-DO-NOT-DEPLOY.yaml > "$RUNNER_TEMP/cloudformation.yaml"
+          cfn-lint --non-zero-exit-code error "$RUNNER_TEMP/cloudformation.yaml"
+
+  unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - run: python -m pytest tests/unit -v
+
+  integration:
+    name: Integration test (kind)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - name: Start kind cluster
+        uses: helm/kind-action@ea822c7bf1874f08e5a491df991c228edffc3376 # v1.15.2
+        with:
+          cluster_name: c4k
+          wait: 120s
+      - name: Run discover -> register -> delete against the cluster
+        env:
+          C4K_INTEGRATION: "1"
+        run: python -m pytest tests/integration -v
+
+  ci-gate:
+    # Single required status check for branch protection.
+    name: CI gate
+    if: always()
+    needs: [build, unit, integration]
+    runs-on: ubuntu-latest
+    steps:
+      - name: All jobs passed
+        run: |
+          echo '${{ toJSON(needs) }}'
+          test "${{ needs.build.result }}" = success
+          test "${{ needs.unit.result }}" = success
+          test "${{ needs.integration.result }}" = success
