@@ -1,0 +1,7 @@
+# Test-only dependencies. The Lambda runtime provides boto3 in production;
+# the versions below pin what CI tests against.
+-r source/functions/discover_resources/requirements.txt
+boto3==1.44.5
+moto[s3]==5.2.5
+pytest==9.2.0
+cfn-lint==1.60.1
