@@ -1,1 +1,1 @@
-kubernetes==37.0.0
+kubernetes==37.0.3
